@@ -1,4 +1,4 @@
-MAKEFLAGS+=-j 20
+MAKEFLAGS+=-j 2
 CC=mipsel-openwrt-linux-gcc
 DEB=-Wall -g
 REL=-Wall -O3 -s
