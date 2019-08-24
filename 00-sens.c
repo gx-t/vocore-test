@@ -28,9 +28,11 @@ static void ctrl_c(int sig)
 static int i2c_read_reg(int i2c_fd, uint8_t reg, uint8_t* buff, uint8_t count)
 {
 	int res = -1;
+
 	if(1 == write(i2c_fd, &reg, 1)) {
 		res = read(i2c_fd, buff, count);
 	}
+
 	return res;
 }
 
@@ -41,11 +43,14 @@ static int i2c_dev_func(const char* i2c_dev_name, uint8_t addr, int (*proc)(int 
         perror(i2c_dev_name);
         return 3;
     }
+
     if(0 > ioctl(i2c_fd, I2C_SLAVE, addr)) {
         perror("Set I2C Address");
         return 4;
     }
+
     int res = proc(i2c_fd);
+
     close(i2c_fd);
     return res;
 }
@@ -53,12 +58,16 @@ static int i2c_dev_func(const char* i2c_dev_name, uint8_t addr, int (*proc)(int 
 static int bmp180_measure_proc(int i2c_fd)
 {
     uint8_t buff[32] = {0};
+
     //read calibration data
+
     if(22 != i2c_read_reg(i2c_fd, 0xAA, buff, 22)) {
         fprintf(stderr, "BMP180: Invalid Calibration Data\n");
         return 5;
     }
+
     short ac1, ac2, ac3, b1, b2, mc, md;
+
     unsigned short ac4, ac5, ac6;
     ac1 = buff[0]  << 8 | buff[1];
     ac2 = buff[2]  << 8 | buff[3];
@@ -72,6 +81,7 @@ static int bmp180_measure_proc(int i2c_fd)
     md  = buff[20] << 8 | buff[21];
 
     //init temp. measurement
+
     buff[0] = 0xF4;
     buff[1] = 0x2e;
     if(2 != write(i2c_fd, buff, 2)) {
@@ -80,17 +90,23 @@ static int bmp180_measure_proc(int i2c_fd)
     }
 
     //wait for ADC to complete measurement
+
     if(0 != usleep(5000)) {
         //interrupted by ctrl+C
         return 0;
     }
+
     //read uncompensated temperarure
+
     if(2 != i2c_read_reg(i2c_fd, 0xF6, buff, 2)) {
         fprintf(stderr, "BMP180: Invalid Reading\n");
         return 7;
     }
+
     long ut = buff[0] << 8 | buff[1];
+
     //init pres. measurement
+
     buff[0] = 0xF4;
     buff[1] = 0xF4;
     if(2 != write(i2c_fd, buff, 2)) {
@@ -99,12 +115,14 @@ static int bmp180_measure_proc(int i2c_fd)
     }
 
     //wait for ADC to complete measurement
+
     if(0 != usleep(26000)) {
         //interrupted by ctrl+C
         return 0;
     }
 
     //read uncompensated pressure
+
     if(3 != i2c_read_reg(i2c_fd, 0xF6, buff, 3)) {
         fprintf(stderr, "BMP180: Invalid Reading\n");
         return 9;
@@ -112,6 +130,7 @@ static int bmp180_measure_proc(int i2c_fd)
     long up = (buff[0] << 16 | buff[1] << 8 | buff[2]) >> 5;
 
     //calculate true temperature
+
     long x1, x2, x3, b3, b5, b6;
     unsigned long b4, b7;
     x1 = (ut - 	ac6) * ac5 >> 15;
