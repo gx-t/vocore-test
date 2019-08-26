@@ -1,41 +1,30 @@
 #include <stdio.h>
-#include <stdarg.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <sys/file.h>
-#include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
-#include <sys/file.h>
 #include <math.h>
 
-#define BMP180_ADDRESS		0x77
-#define BMP180_CALIBREG		0xAA
-#define BMP180_CTRLREG		0xF4
-#define BMP180_CTRL_TEMP	0x2E
-#define BMP180_DATAREG		0xF6
 
 #define LM75_ADDRESS        0x4F
 
 static void ctrl_c(int sig)
 {
-	signal(SIGINT, ctrl_c);
+    signal(SIGINT, ctrl_c);
 }
 
 static int i2c_read_reg(int i2c_fd, uint8_t reg, uint8_t* buff, uint8_t count)
 {
-	int res = -1;
+    int res = -1;
 
-	if(1 == write(i2c_fd, &reg, 1)) {
-		res = read(i2c_fd, buff, count);
-	}
+    if(1 == write(i2c_fd, &reg, 1)) {
+        res = read(i2c_fd, buff, count);
+    }
 
-	return res;
+    return res;
 }
 
 static int i2c_dev_func(const char* i2c_dev_name, uint8_t addr, int (*proc)(int i2c_fd))
@@ -135,7 +124,7 @@ static int bmp180_measure_proc(int i2c_fd)
 
     long x1, x2, x3, b3, b5, b6;
     unsigned long b4, b7;
-    x1 = (ut - 	ac6) * ac5 >> 15;
+    x1 = (ut - ac6) * ac5 >> 15;
     x2 = (mc << 11) / (x1 + md);
     b5 = x1 + x2;
     float t = (b5 + 8) >> 4;
@@ -201,7 +190,7 @@ static int lm75_main()
 
 int main(int argc, char* argv[])
 {
-	signal(SIGINT, ctrl_c);
+    signal(SIGINT, ctrl_c);
     if(2 != argc) {
         fprintf(stderr, "Usage:\n\t%s bmp180|lm75\n", *argv);
         return 1;
