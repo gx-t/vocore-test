@@ -20,6 +20,8 @@
 #define BMP180_CTRL_TEMP	0x2E
 #define BMP180_DATAREG		0xF6
 
+#define LM75_ADDRESS        0x4F
+
 static void ctrl_c(int sig)
 {
 	signal(SIGINT, ctrl_c);
@@ -170,7 +172,20 @@ static int bmp180_measure_proc(int i2c_fd)
     float hg = pf * 0.00750062;
     float hf = 44330 * (1 - pow(pf / 101325, 1.0 / 5.255));
 
-    printf("T=%.1f °C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf / 100, hg, hf);
+    printf("BMP180: T=%.1f °C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf / 100, hg, hf);
+    return 0;
+}
+
+static int lm75_measure_proc(int i2c_fd)
+{
+    uint8_t buff[2] = {0};
+
+    if(2 != i2c_read_reg(i2c_fd, 0x00, buff, 2)) {
+        fprintf(stderr, "LM75: Cannot Read Sensor Data\n");
+        return 10;
+    }
+    float t = (float)((short)buff[0] << 8 | buff[1]) / 256;
+    printf("LM75: T=%.1f °C\n", t);
     return 0;
 }
 
@@ -179,16 +194,23 @@ static int bmp180_main()
     return i2c_dev_func("/dev/i2c-0", BMP180_ADDRESS, bmp180_measure_proc);
 }
 
+static int lm75_main()
+{
+    return i2c_dev_func("/dev/i2c-0", LM75_ADDRESS, lm75_measure_proc);
+}
+
 int main(int argc, char* argv[])
 {
 	signal(SIGINT, ctrl_c);
     if(2 != argc) {
-        fprintf(stderr, "Usage:\n\t%s bmp180\n", *argv);
+        fprintf(stderr, "Usage:\n\t%s bmp180|lm75\n", *argv);
         return 1;
     }
     argv ++;
     if(!strcmp(*argv, "bmp180"))
         return bmp180_main();
+    if(!strcmp(*argv, "lm75"))
+        return lm75_main();
     fprintf(stderr, "Unknown subcommand: %s\n", *argv);
     return 2;
 }
