@@ -8,7 +8,7 @@
 #include <signal.h>
 #include <math.h>
 
-
+#define BMP180_ADDRESS		0x77
 #define LM75_ADDRESS        0x4F
 
 static void ctrl_c(int sig)
@@ -173,8 +173,11 @@ static int lm75_measure_proc(int i2c_fd)
         fprintf(stderr, "LM75: Cannot Read Sensor Data\n");
         return 10;
     }
-    float t = (float)((short)buff[0] << 8 | buff[1]) / 256;
+
+    float t = (float)(((short)(buff[0] << 8) | buff[1]) / 128);
+    t /= 2;
     printf("LM75: T=%.1f °C\n", t);
+
     return 0;
 }
 
