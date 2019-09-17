@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <math.h>
 
 #include <signal.h>
@@ -177,7 +178,38 @@ static int lm75_measure(int i2c_fd, float* temp)
     return 0;
 }
 
-static int udp_measure_fill_buffer(uint8_t* pp)
+static void fill_rand(uint8_t* pp)
+{
+    int i = 0x20;
+    while(i --)
+        *pp ++ = rand() % 0x100;
+}
+
+static void write_uint8(uint8_t** pp, uint8_t val)
+{
+    *(*pp)++ = val;
+}
+
+static void write_uint32(uint8_t** pp, uint32_t val)
+{
+    *(*pp)++ = (val >> 0x00) & 0xFF;
+    *(*pp)++ = (val >> 0x08) & 0xFF;
+    *(*pp)++ = (val >> 0x10) & 0xFF;
+    *(*pp)++ = (val >> 0x18) & 0xFF;
+}
+
+static void write_float(uint8_t** pp, float val)
+{
+    uint32_t vv;
+    memcpy(&vv, &val, sizeof(vv));
+
+    *(*pp)++ = (vv >> 0x00) & 0xFF;
+    *(*pp)++ = (vv >> 0x08) & 0xFF;
+    *(*pp)++ = (vv >> 0x10) & 0xFF;
+    *(*pp)++ = (vv >> 0x18) & 0xFF;
+}
+
+static int udp_measure_fill_buffer(uint8_t buff[0x20])
 {
     int res = 0;
 
@@ -248,22 +280,21 @@ static int udp_measure_fill_buffer(uint8_t* pp)
     munmap((void*)reg_base, PAGE_SIZE);
 
     
-    int i = 0;
-    for(; i < 0x20; i += sizeof(int))
-        *(int*)(pp + i) = rand();
+    fill_rand(buff);
 
-    pp += sizeof(uint32_t); //crc32
-    pp ++ ; //dev id
-    *pp ++ = reg_state;
-    *(float*)pp = t; //lm75
-    pp += sizeof(float);
-    *(float*)pp = tf; //bmp180 temp
-    pp += sizeof(float);
-    *(float*)pp = pf; //bmp180 pressure
-    pp += sizeof(float);
-    *(float*)pp = hg; //bmp180 pressure in mmHg
-    pp += sizeof(float);
-    *(float*)pp = hf; //bmp180 height in meters
+    uint8_t* pp = buff;
+
+    write_uint8(&pp, 0); //dev id
+    write_uint8(&pp, reg_state);
+    write_float(&pp, t);
+    write_float(&pp, tf);
+    write_float(&pp, pf);
+    write_float(&pp, hg);
+    write_float(&pp, hf);
+
+    pp = buff + 0x20 - sizeof(uint32_t);
+    write_uint32(&pp, 0); //crc32
+
     return 0;
 }
 
@@ -425,7 +456,6 @@ static int udp_main(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    signal(SIGINT, ctrl_c);
     if(argc < 2) {
         fprintf(stderr, "Usage:\n"
         "\t%s bmp180\n"
@@ -438,8 +468,13 @@ int main(int argc, char* argv[])
         *argv);
         return 1;
     }
+
     argc --;
     argv ++;
+
+    signal(SIGINT, ctrl_c);
+    srand(time(0));
+
     if(!strcmp(*argv, "bmp180"))
         return bmp180_main();
     if(!strcmp(*argv, "lm75"))
@@ -448,6 +483,7 @@ int main(int argc, char* argv[])
         return gpio_main();
     if(!strcmp(*argv, "udp"))
         return udp_main(argc, argv);
+
     fprintf(stderr, "Unknown subcommand: %s\n", *argv);
     return 2;
 }
