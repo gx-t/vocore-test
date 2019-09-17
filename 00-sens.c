@@ -1,21 +1,36 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
+
 #include <linux/i2c-dev.h>
-#include <stdint.h>
-#include <string.h>
-#include <signal.h>
-#include <math.h>
+
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+
+#define I2C_DEV_NAME        "/dev/i2c-0"
+#define MEM_DEV_NAME        "/dev/mem"
+
+#define REG_BASE_ADDR       0x10000000
+#define PAGE_SIZE           0x1000
 
 #define BMP180_ADDRESS		0x77
 #define LM75_ADDRESS        0x4F
 
+static int g_run = 1;
+
 static void ctrl_c(int sig)
 {
-    signal(SIGINT, ctrl_c);
-    close(0);
+    fprintf(stderr, "\nSIGINT (%d)\n", getpid());
+    g_run = 0;
 }
 
 static int i2c_read_reg(int i2c_fd, uint8_t reg, uint8_t* buff, uint8_t count)
@@ -26,45 +41,6 @@ static int i2c_read_reg(int i2c_fd, uint8_t reg, uint8_t* buff, uint8_t count)
         res = read(i2c_fd, buff, count);
     }
 
-    return res;
-}
-
-static int i2c_dev_func(const char* i2c_dev_name, uint8_t addr, int (*proc)(int i2c_fd, void*), void* ctx)
-{
-    int i2c_fd = open(i2c_dev_name, O_RDWR);
-    if(i2c_fd < 0) {
-        perror(i2c_dev_name);
-        return 3;
-    }
-
-    if(0 > ioctl(i2c_fd, I2C_SLAVE, addr)) {
-        close(i2c_fd);
-        perror("Set I2C Address");
-        return 4;
-    }
-
-    int res = proc(i2c_fd, ctx);
-
-    close(i2c_fd);
-    return res;
-}
-
-static int reg_func(int (*proc)(volatile void*, void*), void* ctx)
-{
-	static const char* dev_name = "/dev/mem";
-	int fd = open(dev_name, O_RDWR | O_SYNC);
-	if(fd == -1) {
-		perror(dev_name);
-		return 5;
-	}
-	volatile void* reg_base = mmap(0, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0x10000000);
-	close(fd);
-	if(MAP_FAILED == reg_base) {
-		perror("mmap");
-        return 6;
-	}
-    int res = proc(reg_base, ctx);
-    munmap((void*)reg_base, 0x1000);
     return res;
 }
 
@@ -187,19 +163,6 @@ static int bmp180_measure(int i2c_fd, float* tf, float* pf, float* hg, float* hf
     return 0;
 }
 
-static int bmp180_measure_proc(int i2c_fd, void* ctx)
-{
-    float tf = 0;
-    float pf = 0;
-    float hg = 0;
-    float hf = 0;
-    if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf))
-        return 5;
-
-    printf("BMP180: T=%.1f °C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
-    return 0;
-}
-
 static int lm75_measure(int i2c_fd, float* temp)
 {
     uint8_t buff[2] = {0};
@@ -214,50 +177,262 @@ static int lm75_measure(int i2c_fd, float* temp)
     return 0;
 }
 
-static int lm75_measure_proc(int i2c_fd, void* ctx)
+static int udp_measure_fill_buffer(uint8_t* pp)
 {
+    int res = 0;
+
     float t = 0;
+    float tf = 0;
+    float pf = 0;
+    float hg = 0;
+    float hf = 0;
+    uint8_t reg_state = 0;
 
-    if(lm75_measure(i2c_fd, &t))
-        return 10;
-    printf("LM75: T=%.1f °C\n", t);
+    int fd = open(I2C_DEV_NAME, O_RDWR);
 
-    return 0;
-}
+    if(fd < 0) {
+        perror(I2C_DEV_NAME);
+        return 3;
+    }
 
-static int gpio_wait_37_down(volatile void* reg_base, void* ctx)
-{
+    do {
+        if(0 > ioctl(fd, I2C_SLAVE, LM75_ADDRESS)) {
+            res = 4;
+            perror("Set LM73 i2c address");
+            break;
+        }
+
+        if(lm75_measure(fd, &t)) {
+            res = 5;
+            break;
+        }
+        printf("LM75: T=%.1f °C\n", t);
+
+        if(0 > ioctl(fd, I2C_SLAVE, BMP180_ADDRESS)) {
+            res = 4;
+            perror("Set BMP180 i2c address");
+            break;
+        }
+
+        if(bmp180_measure(fd, &tf, &pf, &hg, &hf)) {
+            res = 5;
+            break;
+        }
+        printf("BMP180: T=%.1f °C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+
+    } while(0);
+
+    close(fd);
+
+    if(res) {
+        return res;
+    }
+
+	fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+	if(fd == -1) {
+		perror(MEM_DEV_NAME);
+		return 3;
+	}
+
+	volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
+	close(fd);
+	if(MAP_FAILED == reg_base) {
+		perror("mmap");
+        return 4;
+	}
+
     volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
     reg_data += 0x624;
-    while(*reg_data & 0b100000)
-        usleep(100);
-    printf("==>> %d\n", !!(*reg_data & 0b100000));
+    reg_state = !!(*reg_data & 0b100000);
+    printf("GPIO: %d\n", reg_state);
+    munmap((void*)reg_base, PAGE_SIZE);
+
+    
+    int i = 0;
+    for(; i < 0x20; i += sizeof(int))
+        *(int*)(pp + i) = rand();
+
+    pp += sizeof(uint32_t); //crc32
+    pp ++ ; //dev id
+    *pp ++ = reg_state;
+    *(float*)pp = t; //lm75
+    pp += sizeof(float);
+    *(float*)pp = tf; //bmp180 temp
+    pp += sizeof(float);
+    *(float*)pp = pf; //bmp180 pressure
+    pp += sizeof(float);
+    *(float*)pp = hg; //bmp180 pressure in mmHg
+    pp += sizeof(float);
+    *(float*)pp = hf; //bmp180 height in meters
     return 0;
 }
 
 static int bmp180_main()
 {
-    return i2c_dev_func("/dev/i2c-0", BMP180_ADDRESS, bmp180_measure_proc, 0);
+    int res = 0;
+    int i2c_fd = open(I2C_DEV_NAME, O_RDWR);
+
+    if(i2c_fd < 0) {
+        perror(I2C_DEV_NAME);
+        return 3;
+    }
+
+    do {
+        if(0 > ioctl(i2c_fd, I2C_SLAVE, BMP180_ADDRESS)) {
+            res = 4;
+            perror("Set BMP180 i2c address");
+            break;
+        }
+
+        float tf = 0;
+        float pf = 0;
+        float hg = 0;
+        float hf = 0;
+        if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf)) {
+            res = 5;
+            break;
+        }
+        printf("BMP180: T=%.1f °C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+
+    } while(0);
+
+    close(i2c_fd);
+    return res;
 }
 
 static int lm75_main()
 {
-    return i2c_dev_func("/dev/i2c-0", LM75_ADDRESS, lm75_measure_proc, 0);
+    int res = 0;
+    int i2c_fd = open(I2C_DEV_NAME, O_RDWR);
+
+    if(i2c_fd < 0) {
+        perror(I2C_DEV_NAME);
+        return 3;
+    }
+
+    do {
+        if(0 > ioctl(i2c_fd, I2C_SLAVE, LM75_ADDRESS)) {
+            res = 4;
+            perror("Set LM73 i2c address");
+            break;
+        }
+
+        float t = 0;
+        if(lm75_measure(i2c_fd, &t)) {
+            res = 5;
+            break;
+        }
+
+        printf("LM75: T=%.1f °C\n", t);
+    } while(0);
+
+    close(i2c_fd);
+    return res;
 }
 
-static int gpio_wait_main()
+static int gpio_main()
 {
-    return reg_func(gpio_wait_37_down, 0);
+	int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+	if(fd == -1) {
+		perror(MEM_DEV_NAME);
+		return 5;
+	}
+
+	volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
+	close(fd);
+	if(MAP_FAILED == reg_base) {
+		perror("mmap");
+        return 6;
+	}
+
+    volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
+    reg_data += 0x624;
+    printf("GPIO: %d\n", !!(*reg_data & 0b100000));
+    munmap((void*)reg_base, PAGE_SIZE);
+    return 0;
+}
+
+static int udp_main(int argc, char* argv[])
+{
+    int res = 0;
+    if(argc != 3)
+        return 1;
+
+    argc --;
+    argv ++;
+    int ss = socket(AF_INET, SOCK_DGRAM, 0);
+    if(ss < 0) {
+        perror("socket");
+        return 3;
+    }
+    struct timeval tv = {1, 0};
+    if(0 > setsockopt(ss, SOL_SOCKET, SO_RCVTIMEO, (struct timeval*)&tv, sizeof(struct timeval))) {
+        perror("setsockopt");
+        close(ss);
+        return 4;
+    }
+
+    int port = atoi(argv[1]);
+    if(port < 1024 || port > (1 << 16) - 1)
+        port = 27727;
+
+    while(g_run) {
+
+        struct sockaddr_in addr = {.sin_family = AF_INET};
+        struct hostent* he = gethostbyname(argv[0]);
+        if(!he) {
+            perror("gethostbyname");
+            res = 5;
+            break;
+        }
+
+        addr.sin_addr.s_addr = *(uint32_t*)he->h_addr_list[0];
+        addr.sin_port = htons(port);
+
+        uint8_t buff[32];
+        res = udp_measure_fill_buffer(buff);
+
+        socklen_t addr_len = sizeof(addr);
+        int len = 0;
+        len = sendto(ss, buff, sizeof(buff), 0, (struct sockaddr *)&addr, addr_len);
+        if(len != sizeof(buff)) {
+            if(!g_run) {
+                perror("sendto");
+                res = 6;
+            }
+            break;
+        }
+
+        int cnt = 60;
+        while(g_run && cnt) {
+            len = recvfrom(ss, buff, sizeof(buff), 0, (struct sockaddr*)&addr, &addr_len);
+            if(len < 0) {
+                cnt --;
+                continue;
+            }
+            if(!len) {
+                fprintf(stderr, "PING: %s:%d:\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+                continue;
+            }
+            if(len == sizeof(buff)) {
+                break;
+            }
+        }
+    }
+    close(ss);
+    return res;
 }
 
 int main(int argc, char* argv[])
 {
     signal(SIGINT, ctrl_c);
-    if(2 != argc) {
+    if(argc < 2) {
         fprintf(stderr, "Usage:\n"
         "\t%s bmp180\n"
         "\t%s lm75\n"
-        "\t%s gpio_wait\n",
+        "\t%s gpio\n"
+        "\t%s udp\n",
+        *argv,
         *argv,
         *argv,
         *argv);
@@ -269,8 +444,10 @@ int main(int argc, char* argv[])
         return bmp180_main();
     if(!strcmp(*argv, "lm75"))
         return lm75_main();
-    if(!strcmp(*argv, "gpio_wait"))
-        return gpio_wait_main();
+    if(!strcmp(*argv, "gpio"))
+        return gpio_main();
+    if(!strcmp(*argv, "udp"))
+        return udp_main(argc, argv);
     fprintf(stderr, "Unknown subcommand: %s\n", *argv);
     return 2;
 }
