@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <errno.h>
 
 #include <signal.h>
 #include <fcntl.h>
@@ -185,28 +186,27 @@ static void fill_rand(uint8_t* pp)
         *pp ++ = rand() % 0x100;
 }
 
-static void write_uint8(uint8_t** pp, uint8_t val)
+static void write_8bit_val(uint8_t** pp, uint8_t val)
 {
     *(*pp)++ = val;
 }
 
-static void write_uint32(uint8_t** pp, uint32_t val)
+static void write_32bit_val(uint8_t** pp, void* val)
 {
-    *(*pp)++ = (val >> 0x00) & 0xFF;
-    *(*pp)++ = (val >> 0x08) & 0xFF;
-    *(*pp)++ = (val >> 0x10) & 0xFF;
-    *(*pp)++ = (val >> 0x18) & 0xFF;
-}
+    uint8_t* pv = (uint8_t*)val;
 
-static void write_float(uint8_t** pp, float val)
-{
-    uint32_t vv;
-    memcpy(&vv, &val, sizeof(vv));
-
-    *(*pp)++ = (vv >> 0x00) & 0xFF;
-    *(*pp)++ = (vv >> 0x08) & 0xFF;
-    *(*pp)++ = (vv >> 0x10) & 0xFF;
-    *(*pp)++ = (vv >> 0x18) & 0xFF;
+#if ((__BYTE_ORDER__) == (__ORDER_LITTLE_ENDIAN__))
+    *(*pp)++ = *pv++;
+    *(*pp)++ = *pv++;
+    *(*pp)++ = *pv++;
+    *(*pp)++ = *pv;
+#else
+    pv += 3;
+    *(*pp)++ = *pv--;
+    *(*pp)++ = *pv--;
+    *(*pp)++ = *pv--;
+    *(*pp)++ = *pv;
+#endif
 }
 
 static int udp_measure_fill_buffer(uint8_t buff[0x20])
@@ -260,18 +260,18 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
         return res;
     }
 
-	fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
-	if(fd == -1) {
-		perror(MEM_DEV_NAME);
-		return 3;
-	}
+    fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+    if(fd == -1) {
+        perror(MEM_DEV_NAME);
+        return 3;
+    }
 
-	volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
-	close(fd);
-	if(MAP_FAILED == reg_base) {
-		perror("mmap");
+    volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
+    close(fd);
+    if(MAP_FAILED == reg_base) {
+        perror("mmap");
         return 4;
-	}
+    }
 
     volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
     reg_data += 0x624;
@@ -279,21 +279,22 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
     printf("GPIO: %d\n", reg_state);
     munmap((void*)reg_base, PAGE_SIZE);
 
-    
+
     fill_rand(buff);
 
     uint8_t* pp = buff;
 
-    write_uint8(&pp, 0); //dev id
-    write_uint8(&pp, reg_state);
-    write_float(&pp, t);
-    write_float(&pp, tf);
-    write_float(&pp, pf);
-    write_float(&pp, hg);
-    write_float(&pp, hf);
+    write_8bit_val(&pp, 0); //dev id
+    write_8bit_val(&pp, reg_state);
+    write_32bit_val(&pp, &t);
+    write_32bit_val(&pp, &tf);
+    write_32bit_val(&pp, &pf);
+    write_32bit_val(&pp, &hg);
+    write_32bit_val(&pp, &hf);
 
     pp = buff + 0x20 - sizeof(uint32_t);
-    write_uint32(&pp, 0); //crc32
+    uint32_t crc32 = 0;
+    write_32bit_val(&pp, &crc32);
 
     return 0;
 }
@@ -363,18 +364,18 @@ static int lm75_main()
 
 static int gpio_main()
 {
-	int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
-	if(fd == -1) {
-		perror(MEM_DEV_NAME);
-		return 5;
-	}
+    int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+    if(fd == -1) {
+        perror(MEM_DEV_NAME);
+        return 5;
+    }
 
-	volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
-	close(fd);
-	if(MAP_FAILED == reg_base) {
-		perror("mmap");
+    volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
+    close(fd);
+    if(MAP_FAILED == reg_base) {
+        perror("mmap");
         return 6;
-	}
+    }
 
     volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
     reg_data += 0x624;
@@ -427,6 +428,8 @@ static int udp_main(int argc, char* argv[])
         int len = 0;
         len = sendto(ss, buff, sizeof(buff), 0, (struct sockaddr *)&addr, addr_len);
         if(len != sizeof(buff)) {
+            if(EINTR == errno)
+                break;
             if(!g_run) {
                 perror("sendto");
                 res = 6;
@@ -438,8 +441,17 @@ static int udp_main(int argc, char* argv[])
         while(g_run && cnt) {
             len = recvfrom(ss, buff, sizeof(buff), 0, (struct sockaddr*)&addr, &addr_len);
             if(len < 0) {
-                cnt --;
-                continue;
+                if(EINTR == errno)
+                    break;
+
+                if(EAGAIN == errno) {
+                    cnt --;
+                    continue;
+                }
+
+                perror("recvfrom");
+                res = 7;
+                break;
             }
             if(!len) {
                 fprintf(stderr, "PING: %s:%d:\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
@@ -458,14 +470,14 @@ int main(int argc, char* argv[])
 {
     if(argc < 2) {
         fprintf(stderr, "Usage:\n"
-        "\t%s bmp180\n"
-        "\t%s lm75\n"
-        "\t%s gpio\n"
-        "\t%s udp\n",
-        *argv,
-        *argv,
-        *argv,
-        *argv);
+                "\t%s bmp180\n"
+                "\t%s lm75\n"
+                "\t%s gpio\n"
+                "\t%s udp\n",
+                *argv,
+                *argv,
+                *argv,
+                *argv);
         return 1;
     }
 
