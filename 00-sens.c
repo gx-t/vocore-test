@@ -244,11 +244,6 @@ static void fill_rand(uint8_t* pp)
         *pp ++ = rand() % 0x100;
 }
 
-static void write_8bit_val(uint8_t** pp, uint8_t val)
-{
-    *(*pp)++ = val;
-}
-
 static void write_32bit_val(uint8_t** pp, void* val)
 {
     uint8_t* pv = (uint8_t*)val;
@@ -342,8 +337,8 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
 
     uint8_t* pp = buff;
 
-    write_8bit_val(&pp, 0); //dev id
-    write_8bit_val(&pp, reg_state);
+    *pp++ = 0; //dev id
+    *pp++ = reg_state;
     write_32bit_val(&pp, &t);
     write_32bit_val(&pp, &tf);
     write_32bit_val(&pp, &pf);
