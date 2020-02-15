@@ -262,30 +262,43 @@ static void write_32bit_val(uint8_t** pp, void* val)
 #endif
 }
 
+static int i2c_open_dev(int* fd, const char* dev_name)
+{
+    *fd = open(I2C_DEV_NAME, O_RDWR);
+
+    if(*fd < 0) {
+        perror(dev_name);
+        return 3;
+    }
+    return 0;
+}
+
+static int i2c_set_addr(int fd, uint8_t addr)
+{
+    if(0 > ioctl(fd, I2C_SLAVE, addr)) {
+        perror("Set i2c address");
+        return 4;
+    }
+    return 0;
+}
+
 static int udp_measure_fill_buffer(uint8_t buff[0x20])
 {
     int res = 0;
-
     float t = 0;
     float tf = 0;
     float pf = 0;
     float hg = 0;
     float hf = 0;
     uint8_t reg_state = 0;
-
-    int fd = open(I2C_DEV_NAME, O_RDWR);
-
-    if(fd < 0) {
-        perror(I2C_DEV_NAME);
-        return 3;
-    }
+    int fd;
+    
+    if((res = i2c_open_dev(&fd, I2C_DEV_NAME)))
+        return res;
 
     do {
-        if(0 > ioctl(fd, I2C_SLAVE, LM75_ADDRESS)) {
-            res = 4;
-            perror("Set LM73 i2c address");
+        if((res = i2c_set_addr(fd, LM75_ADDRESS)))
             break;
-        }
 
         if(lm75_measure(fd, &t)) {
             res = 5;
@@ -293,11 +306,8 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
         }
         printf("LM75: T=%.1f °C\n", t);
 
-        if(0 > ioctl(fd, I2C_SLAVE, BMP180_ADDRESS)) {
-            res = 4;
-            perror("Set BMP180 i2c address");
+        if((res = i2c_set_addr(fd, BMP180_ADDRESS)))
             break;
-        }
 
         if(bmp180_measure(fd, &tf, &pf, &hg, &hf)) {
             res = 5;
@@ -337,6 +347,7 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
 
     uint8_t* pp = buff;
 
+    *pp++ = 0; //type
     *pp++ = 0; //dev id
     *pp++ = reg_state;
     write_32bit_val(&pp, &t);
@@ -355,19 +366,14 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
 static int bmp180_main()
 {
     int res = 0;
-    int i2c_fd = open(I2C_DEV_NAME, O_RDWR);
+    int i2c_fd;
 
-    if(i2c_fd < 0) {
-        perror(I2C_DEV_NAME);
-        return 3;
-    }
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
+        return res;
 
     do {
-        if(0 > ioctl(i2c_fd, I2C_SLAVE, BMP180_ADDRESS)) {
-            res = 4;
-            perror("Set BMP180 i2c address");
+        if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
             break;
-        }
 
         float tf = 0;
         float pf = 0;
@@ -388,19 +394,14 @@ static int bmp180_main()
 static int lm75_main()
 {
     int res = 0;
-    int i2c_fd = open(I2C_DEV_NAME, O_RDWR);
+    int i2c_fd;
 
-    if(i2c_fd < 0) {
-        perror(I2C_DEV_NAME);
-        return 3;
-    }
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
+        return res;
 
     do {
-        if(0 > ioctl(i2c_fd, I2C_SLAVE, LM75_ADDRESS)) {
-            res = 4;
-            perror("Set LM73 i2c address");
+        if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
             break;
-        }
 
         float t = 0;
         if(lm75_measure(i2c_fd, &t)) {
