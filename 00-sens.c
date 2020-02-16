@@ -18,6 +18,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
+#include <sys/file.h>
+
 #define I2C_DEV_NAME        "/dev/i2c-0"
 #define MEM_DEV_NAME        "/dev/mem"
 
@@ -282,6 +284,24 @@ static int i2c_set_addr(int fd, uint8_t addr)
     return 0;
 }
 
+static int i2c_lock(int fd)
+{
+    if(flock(fd, LOCK_EX)) {
+        perror("i2c lock");
+        return 7;
+    }
+    return 0;
+}
+
+static int i2c_unlock(int fd)
+{
+    if(flock(fd, LOCK_UN)) {
+        perror("i2c unlock");
+        return 8;
+    }
+    return 0;
+}
+
 static int udp_measure_fill_buffer(uint8_t buff[0x20])
 {
     int res = 0;
@@ -291,25 +311,30 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
     float hg = 0;
     float hf = 0;
     uint8_t reg_state = 0;
-    int fd;
+    int i2c_fd;
     
-    if((res = i2c_open_dev(&fd, I2C_DEV_NAME)))
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
         return res;
 
+    if((res = i2c_lock(i2c_fd))) {
+        close(i2c_fd);
+        return res;
+    }
+
     do {
-        if((res = i2c_set_addr(fd, LM75_ADDRESS)))
+        if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
             break;
 
-        if(lm75_measure(fd, &t)) {
+        if(lm75_measure(i2c_fd, &t)) {
             res = 5;
             break;
         }
         printf("LM75: T=%.1f °C\n", t);
 
-        if((res = i2c_set_addr(fd, BMP180_ADDRESS)))
+        if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
             break;
 
-        if(bmp180_measure(fd, &tf, &pf, &hg, &hf)) {
+        if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf)) {
             res = 5;
             break;
         }
@@ -317,13 +342,14 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
 
     } while(0);
 
-    close(fd);
+    i2c_unlock(i2c_fd);
+    close(i2c_fd);
 
     if(res) {
         return res;
     }
 
-    fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+    int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
     if(fd == -1) {
         perror(MEM_DEV_NAME);
         return 3;
@@ -371,6 +397,11 @@ static int bmp180_main()
     if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
         return res;
 
+    if((res = i2c_lock(i2c_fd))) {
+        close(i2c_fd);
+        return res;
+    }
+
     do {
         if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
             break;
@@ -387,6 +418,7 @@ static int bmp180_main()
 
     } while(0);
 
+    i2c_unlock(i2c_fd);
     close(i2c_fd);
     return res;
 }
@@ -398,6 +430,11 @@ static int lm75_main()
 
     if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
         return res;
+
+    if((res = i2c_lock(i2c_fd))) {
+        close(i2c_fd);
+        return res;
+    }
 
     do {
         if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
@@ -412,6 +449,55 @@ static int lm75_main()
         printf("LM75: T=%.1f °C\n", t);
     } while(0);
 
+    i2c_unlock(i2c_fd);
+    close(i2c_fd);
+    return res;
+}
+
+static int cgi_main()
+{
+    int res = 0;
+    int i2c_fd;
+
+    fprintf(stdout, "Access-Control-Allow-Origin: *\r\n");
+    fprintf(stdout, "Content-type: text/plain\r\n\r\n");
+
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
+        return res;
+
+    if((res = i2c_lock(i2c_fd))) {
+        close(i2c_fd);
+        return res;
+    }
+
+    do {
+        if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
+            break;
+
+        float t = 0;
+        if(lm75_measure(i2c_fd, &t)) {
+            res = 5;
+            break;
+        }
+
+        printf("LM75: T=%.1f C\n", t);
+
+        float tf = 0;
+        float pf = 0;
+        float hg = 0;
+        float hf = 0;
+
+        if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
+            break;
+
+        if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf)) {
+            res = 5;
+            break;
+        }
+        printf("BMP180: T=%.1f C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+    } while(0);
+
+    i2c_unlock(i2c_fd);
     close(i2c_fd);
     return res;
 }
@@ -521,37 +607,35 @@ static int udp_main(int argc, char* argv[])
     return res;
 }
 
+static char* extract_cmd(char* argv_0)
+{
+    char* cmd = argv_0;
+    while(*argv_0) {
+        if(*argv_0++ == '/')
+            cmd = argv_0;
+    }
+    return cmd;
+}
+
 int main(int argc, char* argv[])
 {
-    if(argc < 2) {
-        fprintf(stderr, "Usage:\n"
-                "\t%s bmp180\n"
-                "\t%s lm75\n"
-                "\t%s gpio\n"
-                "\t%s udp\n",
-                *argv,
-                *argv,
-                *argv,
-                *argv);
-        return 1;
-    }
-
-    argc --;
-    argv ++;
+    char* cmd = extract_cmd(*argv);
 
     signal(SIGINT, ctrl_c);
     srand(time(0));
 
-    if(!strcmp(*argv, "bmp180"))
+    if(!strcmp(cmd, "00-bmp180"))
         return bmp180_main();
-    if(!strcmp(*argv, "lm75"))
+    if(!strcmp(cmd, "00-lm75"))
         return lm75_main();
-    if(!strcmp(*argv, "gpio"))
+    if(!strcmp(cmd, "00-gpio"))
         return gpio_main();
-    if(!strcmp(*argv, "udp"))
+    if(!strcmp(cmd, "00-cgi"))
+        return cgi_main();
+    if(!strcmp(cmd, "00-udp"))
         return udp_main(argc, argv);
 
-    fprintf(stderr, "Unknown subcommand: %s\n", *argv);
+    fprintf(stderr, "Run as: 00-bmp180, 00-lm75, 00-gpio, 00-cgi or 00-udp\n");
     return 2;
 }
 
