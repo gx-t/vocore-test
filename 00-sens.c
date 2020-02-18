@@ -502,6 +502,45 @@ static int cgi_main()
     return res;
 }
 
+static int loop_main()
+{
+    int res = 0;
+    int i2c_fd;
+
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
+        return res;
+
+    while(g_run && !sleep(3)) {
+        if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
+            break;
+
+        float t = 0;
+        if(lm75_measure(i2c_fd, &t)) {
+            res = 5;
+            break;
+        }
+
+        printf("LM75: T=%.1f C\n", t);
+
+        float tf = 0;
+        float pf = 0;
+        float hg = 0;
+        float hf = 0;
+
+        if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
+            break;
+
+        if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf)) {
+            res = 5;
+            break;
+        }
+        printf("BMP180: T=%.1f C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+    }
+
+    close(i2c_fd);
+    return res;
+}
+
 static int gpio_main()
 {
     int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
@@ -632,6 +671,8 @@ int main(int argc, char* argv[])
         return gpio_main();
     if(!strcmp(cmd, "00-cgi"))
         return cgi_main();
+    if(!strcmp(cmd, "00-loop"))
+        return loop_main();
     if(!strcmp(cmd, "00-udp"))
         return udp_main(argc, argv);
 
