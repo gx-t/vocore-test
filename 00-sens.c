@@ -302,6 +302,34 @@ static int i2c_unlock(int fd)
     return 0;
 }
 
+static int gpio_operation(int (*proc)(volatile uint8_t*))
+{
+    int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
+    if(fd == -1) {
+        perror(MEM_DEV_NAME);
+        return 5;
+    }
+
+    volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
+    close(fd);
+    if(MAP_FAILED == reg_base) {
+        perror("mmap");
+        return 6;
+    }
+
+    int res = proc((volatile uint8_t*)reg_base);
+    munmap((void*)reg_base, PAGE_SIZE);
+
+    return res;
+}
+
+static int gpio37_read_print(volatile uint8_t* reg_base)
+{
+    reg_base += 0x624;
+    printf("GPIO: %d\n", !!(*reg_base & 0b100000));
+    return 0;
+}
+
 static int udp_measure_fill_buffer(uint8_t buff[0x20])
 {
     int res = 0;
@@ -349,25 +377,8 @@ static int udp_measure_fill_buffer(uint8_t buff[0x20])
         return res;
     }
 
-    int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
-    if(fd == -1) {
-        perror(MEM_DEV_NAME);
-        return 3;
-    }
-
-    volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
-    close(fd);
-    if(MAP_FAILED == reg_base) {
-        perror("mmap");
-        return 4;
-    }
-
-    volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
-    reg_data += 0x624;
-    reg_state = !!(*reg_data & 0b100000);
-    printf("GPIO: %d\n", reg_state);
-    munmap((void*)reg_base, PAGE_SIZE);
-
+    if((res = gpio_operation(gpio37_read_print)))
+        return res;
 
     fill_rand(buff);
 
@@ -423,6 +434,12 @@ static int bmp180_main()
     return res;
 }
 
+static void cgi_text_resp_header()
+{
+    fprintf(stdout, "Access-Control-Allow-Origin: *\r\n");
+    fprintf(stdout, "Content-type: text/plain; charset=utf-8\r\n\r\n");
+}
+
 static int lm75_main()
 {
     int res = 0;
@@ -459,8 +476,7 @@ static int cgi_main()
     int res = 0;
     int i2c_fd;
 
-    fprintf(stdout, "Access-Control-Allow-Origin: *\r\n");
-    fprintf(stdout, "Content-type: text/plain\r\n\r\n");
+    cgi_text_resp_header();
 
     if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
         return res;
@@ -507,6 +523,12 @@ static int loop_main()
     int res = 0;
     int i2c_fd;
 
+    float t_avg = 0;
+    float tf_avg = 0;
+    float pf_avg = 0;
+    float hg_avg = 0;
+    float hf_avg = 0;
+
     if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
         return res;
 
@@ -519,8 +541,10 @@ static int loop_main()
             res = 5;
             break;
         }
+        t_avg += t;
+        t_avg /= 2.0;
 
-        printf("LM75: T=%.1f C\n", t);
+        printf("LM75: T=%.1f C\n", t_avg);
 
         float tf = 0;
         float pf = 0;
@@ -534,7 +558,18 @@ static int loop_main()
             res = 5;
             break;
         }
-        printf("BMP180: T=%.1f C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+
+        tf_avg += tf;
+        pf_avg += pf;
+        hg_avg += hg;
+        hf_avg += hf;
+
+        tf_avg /= 2.0;
+        pf_avg /= 2.0;
+        hg_avg /= 2.0;
+        hf_avg /= 2.0;
+
+        printf("BMP180: T=%.1f C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf_avg, pf_avg, hg_avg, hf_avg);
     }
 
     close(i2c_fd);
@@ -543,24 +578,7 @@ static int loop_main()
 
 static int gpio_main()
 {
-    int fd = open(MEM_DEV_NAME, O_RDWR | O_SYNC);
-    if(fd == -1) {
-        perror(MEM_DEV_NAME);
-        return 5;
-    }
-
-    volatile void* reg_base = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, REG_BASE_ADDR);
-    close(fd);
-    if(MAP_FAILED == reg_base) {
-        perror("mmap");
-        return 6;
-    }
-
-    volatile uint8_t* reg_data = (volatile uint8_t*)reg_base;
-    reg_data += 0x624;
-    printf("GPIO: %d\n", !!(*reg_data & 0b100000));
-    munmap((void*)reg_base, PAGE_SIZE);
-    return 0;
+    return gpio_operation(gpio37_read_print);
 }
 
 static int udp_main(int argc, char* argv[])
@@ -646,6 +664,54 @@ static int udp_main(int argc, char* argv[])
     return res;
 }
 
+static int pump_main(int func)
+{
+    int res = 0;
+    int i2c_fd;
+
+    fprintf(stdout, "Access-Control-Allow-Origin: *\r\n");
+    fprintf(stdout, "Content-type: text/plain; charset=utf-8\r\n\r\n");
+
+    if((res = i2c_open_dev(&i2c_fd, I2C_DEV_NAME)))
+        return res;
+
+    if((res = i2c_lock(i2c_fd))) {
+        close(i2c_fd);
+        return res;
+    }
+
+    do {
+        if((res = i2c_set_addr(i2c_fd, LM75_ADDRESS)))
+            break;
+
+        float t = 0;
+        if(lm75_measure(i2c_fd, &t)) {
+            res = 5;
+            break;
+        }
+
+        printf("LM75: T=%.1f C\n", t);
+
+        float tf = 0;
+        float pf = 0;
+        float hg = 0;
+        float hf = 0;
+
+        if((res = i2c_set_addr(i2c_fd, BMP180_ADDRESS)))
+            break;
+
+        if(bmp180_measure(i2c_fd, &tf, &pf, &hg, &hf)) {
+            res = 5;
+            break;
+        }
+        printf("BMP180: T=%.1f C, P=%.2f hPa (%.2f mm, %.1f m)\n", tf, pf, hg, hf);
+    } while(0);
+
+    i2c_unlock(i2c_fd);
+    close(i2c_fd);
+    return res;
+}
+
 static char* extract_cmd(char* argv_0)
 {
     char* cmd = argv_0;
@@ -675,8 +741,14 @@ int main(int argc, char* argv[])
         return loop_main();
     if(!strcmp(cmd, "00-udp"))
         return udp_main(argc, argv);
+    if(!strcmp(cmd, "pump-status"))
+        return pump_main(-1);
+    if(!strcmp(cmd, "pump-on"))
+        return pump_main(1);
+    if(!strcmp(cmd, "pump-off"))
+        return pump_main(0);
 
-    fprintf(stderr, "Run as: 00-bmp180, 00-lm75, 00-gpio, 00-cgi or 00-udp\n");
+    fprintf(stderr, "Run as: 00-bmp180, 00-lm75, 00-gpio, 00-cgi, 00-udp, pump-status, pump-on, pump-off\n");
     return 2;
 }
 
