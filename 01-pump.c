@@ -10,10 +10,10 @@ static void gpio_op(uint8_t* reg_base)
     switch(getchar()) {
         case -1:
             return;
-        case '0':
+        case 0:
             reg_base[0x644] |= 0b100000;
             break;
-        case '1':
+        case 1:
             reg_base[0x634] |= 0b100000;
             break;
     }
